@@ -7,7 +7,8 @@
 .env
 .env.*
 !.env.example
-
+*.xlsx
+*.pdf
 *.key
 *.pem
 *.p12
@@ -256,3 +257,38 @@ backups/
 !README.md
 !README.MD
 !*.example
+
+# Desktop build and local test artifacts
+build/
+dist/
+*.spec
+.test-tmp*/
+build-*/
+
+# Local credentials, downloaded documents, runtime state and diagnostics
+.env
+.env.*
+!.env.example
+temporary-downloads/
+downloads/
+download/
+saida/
+output/
+outputs/
+documentos/
+arquivos/
+cache.json
+*.cache
+*.jsonl
+.d4sign-cache.json
+d4sign_downloader.log
+erro_*.png
+erro_*.html
+diagnostics/
+
+# Local archives or generated project bundles; source files remain trackable
+*.zip
+*.rar
+*.7z
+projeto
+D4Sign.spec

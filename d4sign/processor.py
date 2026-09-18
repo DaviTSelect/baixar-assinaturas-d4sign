@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import time
 from pathlib import Path
 
-from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from .models import Statistics
@@ -27,20 +26,212 @@ class Processor:
         self.downloader = downloader
         self.cache = cache
 
+        # Índice usado para detectar PDFs duplicados por conteúdo sem
+        # recalcular hash de todos os arquivos a cada documento.
+        self._pdf_size_index: dict[Path, dict[int, set[Path]]] = {}
+        self._pdf_hash_cache: dict[Path, tuple[int, int, str]] = {}
+        self.last_audit: dict[str, object] = {}
+
+    # =========================================================
+    # CONTROLE DE DUPLICIDADE DE PDF
+    # =========================================================
+
+    @staticmethod
+    def _mtime_ns(stat_result) -> int:
+        """Retorna mtime em nanos, com fallback para objetos de teste/filesystems antigos."""
+        value = getattr(stat_result, "st_mtime_ns", None)
+        if value is not None:
+            return int(value)
+        return int(float(getattr(stat_result, "st_mtime", 0)) * 1_000_000_000)
+
+    def _ensure_pdf_index(self, folder: Path) -> dict[int, set[Path]]:
+        """Indexa PDFs existentes por tamanho. O SHA-256 é calculado somente quando necessário."""
+        folder = Path(folder).resolve()
+
+        if folder in self._pdf_size_index:
+            return self._pdf_size_index[folder]
+
+        index: dict[int, set[Path]] = {}
+
+        if folder.exists():
+            for pdf in folder.glob("*.pdf"):
+                try:
+                    if not pdf.is_file() or not is_pdf(pdf):
+                        continue
+                    resolved = pdf.resolve()
+                    size = resolved.stat().st_size
+                    index.setdefault(size, set()).add(resolved)
+                except OSError:
+                    continue
+
+        self._pdf_size_index[folder] = index
+        return index
+
+    def _pdf_sha256(self, path: Path) -> str | None:
+        """Calcula SHA-256 com cache invalidado automaticamente se tamanho/mtime mudar."""
+        try:
+            path = Path(path).resolve()
+            stat_result = path.stat()
+            signature = (
+                int(stat_result.st_size),
+                self._mtime_ns(stat_result),
+            )
+
+            cached = self._pdf_hash_cache.get(path)
+            if cached and cached[:2] == signature:
+                return cached[2]
+
+            digest = hashlib.sha256()
+            with path.open("rb") as file:
+                for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                    digest.update(chunk)
+
+            value = digest.hexdigest()
+            self._pdf_hash_cache[path] = (signature[0], signature[1], value)
+            return value
+
+        except (OSError, TypeError, ValueError):
+            return None
+
+    def _remove_from_pdf_index(self, path: Path) -> None:
+        """Remove um caminho dos índices locais antes de apagar/substituir o arquivo."""
+        try:
+            resolved = Path(path).resolve()
+        except (OSError, TypeError, ValueError):
+            return
+
+        self._pdf_hash_cache.pop(resolved, None)
+
+        for index in self._pdf_size_index.values():
+            for paths in index.values():
+                paths.discard(resolved)
+
+    def _add_to_pdf_index(self, path: Path) -> None:
+        """Registra um PDF novo no índice da pasta, se o índice já tiver sido criado."""
+        try:
+            path = Path(path).resolve()
+            folder = path.parent.resolve()
+            if folder not in self._pdf_size_index:
+                return
+            size = path.stat().st_size
+            self._pdf_size_index[folder].setdefault(size, set()).add(path)
+            self._pdf_hash_cache.pop(path, None)
+        except (OSError, TypeError, ValueError):
+            return
+
+    def _find_duplicate_pdf(
+        self,
+        candidate: Path,
+        destination: Path,
+    ) -> Path | None:
+        """
+        Retorna outro PDF da pasta com conteúdo idêntico ao candidato.
+
+        O nome do arquivo não é usado para decidir duplicidade; a comparação
+        final é feita por SHA-256. Primeiro filtramos pelo tamanho para manter
+        a verificação rápida mesmo com milhares de PDFs.
+        """
+        try:
+            candidate = Path(candidate).resolve()
+            destination = Path(destination)
+            folder = destination.parent.resolve()
+
+            if not candidate.exists() or not candidate.is_file() or not is_pdf(candidate):
+                return None
+
+            size = candidate.stat().st_size
+            index = self._ensure_pdf_index(folder)
+            peers = list(index.get(size, set()))
+
+            if not peers:
+                return None
+
+            candidate_hash = self._pdf_sha256(candidate)
+            if not candidate_hash:
+                return None
+
+            for other in peers:
+                try:
+                    other = Path(other).resolve()
+                    if other == candidate:
+                        continue
+                    if not other.exists() or not is_pdf(other):
+                        continue
+                    if self._pdf_sha256(other) == candidate_hash:
+                        return other
+                except (OSError, TypeError, ValueError):
+                    continue
+
+        except (OSError, TypeError, ValueError):
+            return None
+
+        return None
+
+    def _invalidate_cached_document(self, project_id: str, uuid: str) -> None:
+        """Marca cache inconsistente como não baixado quando a implementação suporta isso."""
+        marker = getattr(self.cache, "mark_not_downloaded", None)
+        if callable(marker):
+            marker(project_id, uuid)
+
+    def _audit_expected_files(
+        self,
+        expected_files: dict[str, Path],
+    ) -> dict[str, object]:
+        """Audita se todos os UUIDs esperados terminaram com PDFs válidos e únicos."""
+        missing: list[str] = []
+        duplicate_uuids: set[str] = set()
+        duplicate_pairs: set[tuple[str, str]] = set()
+        path_to_uuid = {
+            Path(path).resolve(): uuid
+            for uuid, path in expected_files.items()
+        }
+
+        for uuid, path in expected_files.items():
+            path = Path(path)
+
+            if not is_pdf(path):
+                missing.append(uuid)
+                continue
+
+            duplicate = self._find_duplicate_pdf(path, path)
+            if duplicate is None:
+                continue
+
+            duplicate = Path(duplicate).resolve()
+            other_uuid = path_to_uuid.get(duplicate)
+
+            duplicate_uuids.add(uuid)
+            if other_uuid:
+                duplicate_uuids.add(other_uuid)
+                duplicate_pairs.add(tuple(sorted((uuid, other_uuid))))
+            else:
+                duplicate_pairs.add((uuid, duplicate.name))
+
+        result = {
+            "expected": len(expected_files),
+            "valid_unique": len(expected_files) - len(set(missing)) - len(duplicate_uuids),
+            "missing": sorted(set(missing)),
+            "duplicate_uuids": sorted(duplicate_uuids),
+            "duplicate_pairs": sorted(duplicate_pairs),
+            "complete": not missing and not duplicate_uuids,
+        }
+        self.last_audit = result
+        return result
+
     # =========================================================
     # PROCESSAR APENAS O LINK ESPECÍFICO
     # =========================================================
 
     def process_specific_link(self) -> Statistics:
+        return self.process_location(self.config.vault_uuid, "Cofre_Especifico",
+                                     self.config.download_dir / "Cofre_Especifico")
+
+    def process_location(self, project_id: str, project_name: str, folder_dir: Path) -> Statistics:
         """
-        Método adaptado para baixar arquivos exclusivamente do cofre específico
-        passado pelo link: 1288308/e1334fa1-ccc7-4963-ae06-ec8ee1c93b62.html
+        Processa os documentos diretamente nesta localização, mantendo a
+        paginação e a auditoria. A sessão percorre as subpastas separadamente.
         """
         stats = Statistics()
-
-        # Extraindo o UUID diretamente do seu link
-        project_id = "e1334fa1-ccc7-4963-ae06-ec8ee1c93b62"
-        project_name = "Cofre_Especifico" 
 
         print()
         print("=" * 70)
@@ -61,11 +252,6 @@ class Processor:
         # DIRETÓRIO DO PROJETO (Onde os PDFs serão salvos)
         # =====================================================
 
-        folder_dir = (
-            self.config.download_dir
-            / sanitize_filename(project_name)
-        )
-
         folder_dir.mkdir(
             parents=True,
             exist_ok=True,
@@ -76,6 +262,8 @@ class Processor:
         # =====================================================
 
         page = 0
+        expected_files: dict[str, Path] = {}
+        seen_pages = set()
 
         while True:
             print()
@@ -109,6 +297,15 @@ class Processor:
                 )
                 break
 
+            try:
+                signature = tuple(DocumentParser.uuid(row) for row in rows)
+            except Exception:
+                signature = ()
+            if any(signature):
+                if signature in seen_pages:
+                    raise RuntimeError(f"O site repetiu uma página de {project_name}. A listagem não pôde ser concluída.")
+                seen_pages.add(signature)
+
             stats.pages += 1
             stats.documents += len(rows)
 
@@ -131,11 +328,27 @@ class Processor:
                 )
                 print("-" * 70)
 
+                preview_uuid = None
+                preview_name = "documento"
+                try:
+                    preview_uuid = DocumentParser.uuid(row)
+                    preview_name = DocumentParser.name(row) or "documento"
+                except Exception:
+                    pass
+
                 result = self.process_document(
                     row=row,
                     folder_dir=folder_dir,
                     project_id=project_id,
                 )
+
+                if preview_uuid and result != "skipped":
+                    preview_uuid = str(preview_uuid).strip()
+                    preview_name = str(preview_name).strip() or "documento"
+                    expected_files[preview_uuid] = (
+                        folder_dir
+                        / f"{sanitize_filename(preview_name)} - {preview_uuid}.pdf"
+                    )
 
                 if result == "downloaded":
                     stats.downloaded += 1
@@ -158,6 +371,30 @@ class Processor:
             print("=" * 70)
 
             page += 1
+
+        print()
+        print("=" * 70)
+        print("AUDITORIA FINAL DOS PDFs")
+        print("=" * 70)
+
+        audit = self._audit_expected_files(expected_files)
+
+        if audit["complete"]:
+            print(
+                f"✓ Todos os {audit['expected']} documentos esperados "
+                "possuem PDF válido e sem repetição por conteúdo."
+            )
+        else:
+            print("✗ A auditoria final encontrou pendências.")
+            print(f"  Esperados: {audit['expected']}")
+            print(f"  Válidos e únicos: {audit['valid_unique']}")
+            if audit["missing"]:
+                print(f"  UUIDs sem PDF válido: {', '.join(audit['missing'])}")
+            if audit["duplicate_uuids"]:
+                print(
+                    "  UUIDs com conteúdo repetido: "
+                    + ", ".join(audit["duplicate_uuids"])
+                )
 
         return stats
 
@@ -186,17 +423,57 @@ class Processor:
 
         name = str(name).strip()
 
+        filename = f"{sanitize_filename(name)} - {uuid}.pdf"
+        destination = folder_dir / filename
+
         print(f"Nome: {name}")
         print(f"UUID: {uuid}")
+        print(f"\nDestino:\n{destination}")
+
+        # -----------------------------------------------------
+        # O DISCO É A FONTE DE VERDADE
+        # -----------------------------------------------------
+        # Um cache antigo pode afirmar que o UUID já foi baixado mesmo
+        # quando o arquivo foi apagado/corrompido ou quando, por causa do
+        # bug do seletor global, ele contém o MESMO PDF de outro UUID.
+        existing_pdf = is_pdf(destination)
+
+        if existing_pdf:
+            duplicate = self._find_duplicate_pdf(
+                destination,
+                destination,
+            )
+
+            if duplicate is not None:
+                print()
+                print("⚠️ PDF REPETIDO DETECTADO NO DISCO.")
+                print(f"   Atual: {destination.name}")
+                print(f"   Igual a: {duplicate.name}")
+                print("→ O arquivo repetido será descartado e baixado novamente.")
+
+                self._remove_from_pdf_index(destination)
+                try:
+                    destination.unlink(missing_ok=True)
+                except OSError as exc:
+                    print(f"⚠️ Não foi possível remover o PDF repetido: {exc}")
+
+                self._invalidate_cached_document(project_id, uuid)
+                existing_pdf = False
 
         print("\nConsultando cache...")
         if self.cache.contains(project_id, uuid):
-            print("✓ UUID encontrado no cache.")
-            print("✓ Documento já foi baixado.")
-            print("→ Pulando para o próximo.")
-            return "cached"
+            if existing_pdf:
+                print("✓ UUID encontrado no cache.")
+                print("✓ PDF correspondente existe e é válido.")
+                print("→ Pulando para o próximo.")
+                return "cached"
 
-        print("→ UUID não encontrado no cache.")
+            print("⚠️ UUID estava no cache, mas o PDF não existe/é inválido/repetido.")
+            print("→ Cache será invalidado e o documento será baixado novamente.")
+            self._invalidate_cached_document(project_id, uuid)
+        else:
+            print("→ UUID não encontrado no cache.")
+
         print("→ Documento será analisado.")
 
         if not DocumentParser.finalized(row):
@@ -206,12 +483,7 @@ class Processor:
 
         print("\n✓ Documento está FINALIZADO.")
 
-        filename = f"{sanitize_filename(name)} - {uuid}.pdf"
-        destination = folder_dir / filename
-
-        print(f"\nDestino:\n{destination}")
-
-        if is_pdf(destination):
+        if existing_pdf:
             print("\n✓ PDF já existe no disco.")
             print("→ Adicionando UUID ao cache.")
             self.cache.add(project_id, uuid)
@@ -253,7 +525,10 @@ class Processor:
         driver = self.browser.driver
         download_dir = Path(self.config.download_dir)
         
-        max_retries = 3
+        max_retries = max(
+            1,
+            int(getattr(self.config, "download_retries", 3)),
+        )
 
         for attempt in range(1, max_retries + 1):
             print(f"\n>>> Tentativa de download {attempt}/{max_retries}...")
@@ -281,12 +556,14 @@ class Processor:
                 except Exception as menu_exc:
                     print(f"⚠️ Aviso ao abrir menu (tentativa {attempt}): {menu_exc}")
 
+                # IMPORTANTE: o link deve ser procurado DENTRO DA LINHA
+                # atual. O XPath global usado anteriormente podia retornar o
+                # primeiro link de download da página, fazendo vários UUIDs
+                # baixarem exatamente o mesmo PDF.
                 download_link = WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located(
-                        (
-                            By.XPATH,
-                            "//ul[contains(@class, 'dropdown-menu')]//a[contains(., 'Download (apenas assinaturas)') or contains(@href, '/pdf')]",
-                        )
+                    lambda _driver: (
+                        DocumentParser.download_element(row)
+                        or False
                     )
                 )
 
@@ -376,12 +653,46 @@ class Processor:
                     time.sleep(1)
 
                 if arquivo_pdf:
+                    if not is_pdf(arquivo_pdf):
+                        print(
+                            "⚠️ O arquivo recebido não é um PDF válido. "
+                            "Tentando novamente."
+                        )
+                        try:
+                            arquivo_pdf.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                        arquivo_pdf = None
+                        continue
+
+                    duplicate = self._find_duplicate_pdf(
+                        arquivo_pdf,
+                        destination,
+                    )
+
+                    if duplicate is not None:
+                        print()
+                        print("⚠️ DOWNLOAD REPETIDO DETECTADO.")
+                        print(f"   Recebido: {arquivo_pdf.name}")
+                        print(f"   Já existe como: {duplicate.name}")
+                        print("→ Este download NÃO será aceito para outro UUID.")
+                        print("→ Tentando novamente o documento correto...")
+
+                        try:
+                            arquivo_pdf.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+
+                        arquivo_pdf = None
+                        continue
+
                     destination.parent.mkdir(
                         parents=True,
                         exist_ok=True,
                     )
 
                     if destination.exists():
+                        self._remove_from_pdf_index(destination)
                         try:
                             destination.unlink()
                         except OSError:
@@ -390,6 +701,24 @@ class Processor:
                     arquivo_pdf.replace(destination)
 
                     if is_pdf(destination):
+                        duplicate_after_move = self._find_duplicate_pdf(
+                            destination,
+                            destination,
+                        )
+
+                        if duplicate_after_move is not None:
+                            print()
+                            print("⚠️ PDF final ficou idêntico a outro documento.")
+                            print(f"   Igual a: {duplicate_after_move.name}")
+                            print("→ Removendo e tentando novamente.")
+                            self._remove_from_pdf_index(destination)
+                            try:
+                                destination.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+                            continue
+
+                        self._add_to_pdf_index(destination)
                         print("✓ DOWNLOAD CONCLUÍDO COM SUCESSO!")
                         return True
 

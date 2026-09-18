@@ -533,14 +533,17 @@ class D4SignBrowser:
     ):
         driver = self.current_driver
 
+        location_url = getattr(self.config, 'location_url', '')
         url = (
+            f"{location_url}?p={page}&f="
+            if location_url else
             f"{self.config.base_url}"
             f"/desk/cofres/"
             f"{self.config.vault_id}/"
             f"{folder_uuid}.html"
             f"?p={page}"
             f"&f="
-            f"&fase=NA=="
+            f"{'' if getattr(self.config, 'include_all_statuses', False) else '&fase=NA=='}"
         )
 
         print()
@@ -550,6 +553,10 @@ class D4SignBrowser:
         print(url)
 
         self.get(url)
+
+        if getattr(self.config, 'include_all_statuses', False):
+            if folder_uuid.lower() not in driver.current_url.lower() or driver.find_elements(By.CSS_SELECTOR, 'input#Passwd'):
+                raise RuntimeError('A sessão expirou ou esta pasta não está mais acessível. Entre novamente.')
 
         try:
             WebDriverWait(

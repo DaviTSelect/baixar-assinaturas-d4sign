@@ -32,13 +32,15 @@ class Config:
     download_retries: int
     retry_delay: float
     folder_name_filter: str | None
+    include_all_statuses: bool = False
+    location_url: str = ''
 
     @classmethod
     def load(cls):
         load_dotenv()
 
-        email = os.getenv("D4SIGN_EMAIL", "centraldebolsas@facto.org.br").strip()
-        password = os.getenv("D4SIGN_PASSWORD", "02092024")
+        email = os.getenv("D4SIGN_EMAIL", "").strip()
+        password = os.getenv("D4SIGN_PASSWORD", "")
 
         if not email:
             raise RuntimeError(
@@ -98,7 +100,7 @@ class Config:
             ),
 
             # Chrome sem interface gráfica
-            headless=env_bool(
+            headless=not os.getenv("DEVELOPMENT") and env_bool(
                 os.getenv(
                     "HEADLESS",
                     "True",
