@@ -27,7 +27,13 @@ def desktop_config(email, password, directory):
         download_retries=3, retry_delay=2, folder_name_filter=None, include_all_statuses=True,
     )
 
+def resource_path(relative_path: str) -> Path:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / relative_path
 
+    return Path(__file__).resolve().parent.parent / relative_path
+
+    # Removed redundant return statement
 class Desktop:
     def __init__(self, root):
         self.root, self.events = root, Queue()
@@ -35,7 +41,8 @@ class Desktop:
         self.auto_updating = False
         self.session = self.update = self.pending_installer = None
         self.roots = []
-        root.title(f"D4Sign • Central Bolsas • {VERSION}")
+        
+        root.title(f"D4Sign • Baixar Assinaturas • {VERSION}")
         root.configure(bg="#203447")
         style = ttk.Style(root)
         try:
@@ -52,6 +59,10 @@ class Desktop:
         style.configure("Treeview", background="#172633", fieldbackground="#172633", foreground="#efede5")
         style.map("Treeview", background=[("selected", "#e94c1f")], foreground=[("selected", "#efede5")])
         root.geometry("850x780")
+        icon_path = resource_path("icon/logo.ico")
+
+        if icon_path.exists():
+            self.root.iconbitmap(str(icon_path))
         root.minsize(700, 650)
         frame = ttk.Frame(root, padding=20)
         frame.pack(fill="both", expand=True)

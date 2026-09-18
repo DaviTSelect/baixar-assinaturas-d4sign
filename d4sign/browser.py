@@ -14,7 +14,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
-
+import os
 from .config import Config
 from .models import Folder
 from .utils import extract_uuid
@@ -31,7 +31,6 @@ class D4SignBrowser:
     # =========================================================
 
     def start(self) -> None:
-
         print("Iniciando Chrome...")
 
         self.config.download_dir.mkdir(
@@ -51,22 +50,74 @@ class D4SignBrowser:
         options.add_argument("--disable-notifications")
         options.add_argument("--disable-infobars")
 
-        # Configurações essenciais para download automático no Chrome Headless (VPS)
+        # ---------------------------------------------------------
+        # Chrome e ChromeDriver manuais
+        # ---------------------------------------------------------
+
+        user_profile = os.environ["USERPROFILE"]
+
+        chromedriver_path = os.path.join(
+            user_profile,
+            "Chrome",
+            "chromedriver.exe",
+        )
+
+        chrome_path = os.path.join(
+            user_profile,
+            "Chrome",
+            "GoogleChrome",
+            "App",
+            "Chrome-bin",
+            "chrome.exe",
+        )
+
+        # Verifica se os arquivos existem
+        if not os.path.isfile(chromedriver_path):
+            raise FileNotFoundError(
+                f"ChromeDriver nao encontrado em: {chromedriver_path}"
+            )
+
+        if not os.path.isfile(chrome_path):
+            raise FileNotFoundError(
+                f"Chrome nao encontrado em: {chrome_path}"
+            )
+
+        print(f"Chrome: {chrome_path}")
+        print(f"ChromeDriver: {chromedriver_path}")
+
+        # IMPORTANTE:
+        # Forca o Selenium a usar exatamente o Chrome manual.
+        options.binary_location = chrome_path
+
+        # ---------------------------------------------------------
+        # Downloads
+        # ---------------------------------------------------------
+
+        download_dir = str(
+            self.config.download_dir.resolve()
+        )
+
         prefs = {
-            "download.default_directory": str(
-                self.config.download_dir.resolve()
-            ),
+            "download.default_directory": download_dir,
             "download.prompt_for_download": False,
             "download.directory_upgrade": True,
             "plugins.always_open_pdf_externally": True,
             "safebrowsing.enabled": True,
         }
 
-        options.add_experimental_option("prefs", prefs)
-
-        service = Service(
-            ChromeDriverManager().install()
+        options.add_experimental_option(
+            "prefs",
+            prefs,
         )
+
+        # Forca o ChromeDriver manual.
+        service = Service(
+            executable_path=chromedriver_path
+        )
+
+        # ---------------------------------------------------------
+        # Inicia Chrome
+        # ---------------------------------------------------------
 
         self.driver = webdriver.Chrome(
             service=service,
@@ -77,25 +128,26 @@ class D4SignBrowser:
             self.config.page_timeout
         )
 
-        # Forçar comportamento de download via CDP para VPS
+        # ---------------------------------------------------------
+        # Download via CDP
+        # ---------------------------------------------------------
+
         try:
             self.driver.execute_cdp_cmd(
                 "Page.setDownloadBehavior",
                 {
                     "behavior": "allow",
-                    "downloadPath": str(
-                        self.config.download_dir.resolve()
-                    ),
+                    "downloadPath": download_dir,
                 },
             )
+
         except Exception as exc:
             print(
-                f"Aviso: não foi possível configurar "
+                f"Aviso: nao foi possivel configurar "
                 f"download CDP: {exc}"
             )
 
         print("Chrome iniciado.")
-
     # =========================================================
     # DRIVER
     # =========================================================
