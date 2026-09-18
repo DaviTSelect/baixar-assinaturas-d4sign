@@ -9,6 +9,7 @@ from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 
 from .config import Config
+from .cache import Cache
 from .catalog import location_paths, selected_locations
 from .session import Session
 from .updates import check_update, download_update
@@ -98,6 +99,7 @@ class Desktop:
         destination.pack(fill="x", pady=8)
         self.destination = ttk.Entry(destination)
         self.destination.insert(0, str(Path.home() / "Downloads" / "D4Sign"))
+        Cache(Path(self.destination.get()) / ".d4sign-cache.json")
         self.destination.pack(side="left", fill="x", expand=True)
         browse = ttk.Button(destination, text="Escolher destino…", command=self.browse)
         browse.pack(side="right", padx=(8, 0))

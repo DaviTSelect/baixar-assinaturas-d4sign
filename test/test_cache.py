@@ -1,7 +1,54 @@
 import json
+import os
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 from d4sign.cache import Cache
+
+
+@pytest.mark.parametrize("age, refreshed, deleted", [
+    (2 * 86400 - 1, False, False),
+    (2 * 86400, True, True),
+    (2 * 86400 + 1, True, True),
+    (3 * 86400, True, True),
+    (4 * 86400, True, True),
+    (-60, False, False),
+])
+def test_cache_expiration(tmp_path, monkeypatch, age, refreshed, deleted):
+    path = tmp_path / "cache.json"
+    original = {"p": {"u": True}}
+    path.write_text(json.dumps(original), encoding="utf-8")
+    now = 1800000000
+    os.utime(path, (now - age, now - age))
+    monkeypatch.setattr("d4sign.cache.time.time", lambda: now)
+    original_unlink = Path.unlink
+    removed = []
+
+    def unlink(target, *args, **kwargs):
+        removed.append(target)
+        return original_unlink(target, *args, **kwargs)
+
+    with patch.object(Path, "unlink", unlink):
+        cache = Cache(path)
+
+    expected = {} if refreshed else original
+    assert cache.data == expected
+    assert json.loads(path.read_text(encoding="utf-8")) == expected
+    assert (path in removed) is deleted
+    # A recarga feita pelos pontos de entrada não restaura os dados expirados.
+    cache.load()
+    assert cache.data == expected
+
+
+def test_download_recente_renova_prazo(tmp_path, monkeypatch):
+    path = tmp_path / "cache.json"
+    cache = Cache(path)
+    cache.mark_downloaded("p", "u")
+    modified = path.stat().st_mtime
+    monkeypatch.setattr("d4sign.cache.time.time", lambda: modified + 86400)
+    assert Cache(path).is_downloaded("p", "u")
 
 
 def test_cache_init_sem_arquivo(tmp_path: Path):

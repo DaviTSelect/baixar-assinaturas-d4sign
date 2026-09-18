@@ -1,41 +1,46 @@
-# Correção de PDFs repetidos no D4Sign
+# Verificação de PDFs repetidos
 
-## Problema encontrado
+## Problema que motivou a regra
 
-O fluxo de `Processor.download_selenium()` abria o menu da linha atual, mas localizava o link de download com um XPath global (`//...`) na página. Isso permitia que o Selenium selecionasse repetidamente o primeiro link de download disponível, salvando o mesmo PDF com nomes/UUIDs diferentes.
+Um seletor global de download podia retornar o link de outro documento. O mesmo PDF acabava salvo com nomes e UUIDs diferentes. O cache também podia indicar sucesso para um arquivo ausente ou incorreto.
 
-Além disso, o cache era consultado antes de validar o arquivo no disco. Assim, um UUID marcado como baixado podia ser pulado mesmo quando o PDF estivesse ausente, inválido ou fosse uma cópia de outro documento.
+## Funcionamento atual
 
-## Correções aplicadas
+O fluxo de [Processor](d4sign/processor.py) segue estas etapas:
 
-1. O link de download agora é localizado exclusivamente dentro da linha (`row`) que está sendo processada por meio de `DocumentParser.download_element(row)`.
-2. O disco passou a ser a fonte de verdade: cache só é aceito quando o PDF correspondente existe e é válido.
-3. Cache obsoleto é invalidado e o UUID volta a ser baixado.
-4. PDFs são comparados por conteúdo usando SHA-256, com índice por tamanho para evitar hash desnecessário em milhares de arquivos.
-5. Um PDF baixado que seja idêntico a outro UUID é rejeitado e não é aceito como sucesso.
-6. PDFs repetidos deixados por execuções antigas são detectados quando o UUID é processado e são baixados novamente.
-7. Ao final, uma auditoria confirma quantos UUIDs esperados possuem PDF válido e único e lista qualquer pendência.
-8. A lógica respeita `download_retries` da configuração em vez de fixar sempre três tentativas.
+1. Obtém o UUID e monta o destino `Nome - UUID.pdf`.
+2. Verifica o arquivo existente com `is_pdf()`.
+3. Compara possíveis duplicatas da mesma pasta por tamanho e SHA-256.
+4. Se o PDF estiver ausente, inválido ou repetido, invalida o status no cache e tenta baixar novamente.
+5. Localiza o botão com `DocumentParser.download_element(row)`, dentro da linha atual.
+6. Valida o download antes de marcar sucesso no cache.
+7. Audita os arquivos esperados ao terminar a localização.
 
-## Garantia operacional
+O número de tentativas vem de `download_retries`. Um PDF existente, válido e sem duplicata pode ser reutilizado mesmo após a renovação do JSON.
 
-O programa não marca um novo UUID como baixado se o arquivo final não for um PDF válido. Também não aceita silenciosamente um PDF cujo conteúdo SHA-256 seja igual ao de outro UUID da mesma pasta.
+## Limites da verificação
 
-A auditoria final informa explicitamente se todos os documentos encontrados terminaram com arquivos válidos e únicos. Falhas externas permanentes (site fora do ar, sessão expirada, bloqueio do navegador, falta de permissão ou rede indisponível) ainda podem impedir um download; nesses casos o UUID permanece pendente e a auditoria não declara conclusão total.
+`is_pdf()` confere a existência, o tamanho mínimo e o cabeçalho `%PDF-`. Não analisa todas as páginas nem valida assinaturas digitais.
 
-## Testes
+A comparação de conteúdo ocorre na mesma pasta de destino. Dois documentos distintos com bytes idênticos são tratados como duplicados pela regra atual. A auditoria abrange os documentos encontrados durante o processamento, não comprova que o site exibiu todos os documentos da conta.
 
-A suíte atual valida a correção com cobertura obrigatória de linhas e branches:
+O resultado fica em `Processor.last_audit`:
 
-- 176 testes;
-- 176 passando;
-- 1447 statements cobertos;
-- 374 branches cobertos;
-- 100% line coverage;
-- 100% branch coverage.
+| Campo | Significado |
+|---|---|
+| `expected` | Quantidade de documentos esperados |
+| `valid_unique` | Quantidade de arquivos válidos sem duplicata identificada |
+| `missing` | UUIDs com arquivo ausente ou inválido |
+| `duplicate_uuids` | UUIDs envolvidos em duplicidade |
+| `duplicate_pairs` | Pares identificados como repetidos |
+| `complete` | Indica ausência de pendências na auditoria |
 
-No PowerShell:
+## Testar uma alteração
+
+Na pasta do aplicativo, com as dependências de teste instaladas:
 
 ```powershell
-.\test\run_coverage.ps1
+python -m pytest test/test_processor.py test/test_processor_duplicate_coverage.py test/test_parser.py -q
 ```
+
+Veja [como preparar os testes](test/README.md). Alterações nos seletores também devem ser verificadas manualmente com documentos de conteúdos diferentes.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Dict
 
@@ -23,6 +24,8 @@ class Cache:
     false = documento ainda não foi baixado
     """
 
+    REFRESH_AFTER = 2 * 24 * 60 * 60
+
     def __init__(self, cache_file: Path):
         self.cache_file = Path(cache_file)
 
@@ -44,6 +47,15 @@ class Cache:
             return
 
         try:
+            # A última gravação representa a atividade mais recente do download.
+            # Para arquivos nunca editados, ela também corresponde à criação.
+            age = time.time() - self.cache_file.stat().st_mtime
+            if age >= self.REFRESH_AFTER:
+                self.data = {}
+                self.cache_file.unlink()
+                self.save()
+                return
+
             with self.cache_file.open(
                 "r",
                 encoding="utf-8",

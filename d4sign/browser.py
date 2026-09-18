@@ -587,7 +587,7 @@ class D4SignBrowser:
 
         location_url = getattr(self.config, 'location_url', '')
         url = (
-            f"{location_url}?p={page}&f="
+            f"{location_url}?p={page}&f=&fase=NA=="
             if location_url else
             f"{self.config.base_url}"
             f"/desk/cofres/"
@@ -595,7 +595,7 @@ class D4SignBrowser:
             f"{folder_uuid}.html"
             f"?p={page}"
             f"&f="
-            f"{'' if getattr(self.config, 'include_all_statuses', False) else '&fase=NA=='}"
+            f"&fase=NA=="
         )
 
         print()

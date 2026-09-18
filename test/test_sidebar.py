@@ -117,4 +117,4 @@ def test_download_uses_exact_sidebar_folder_address(monkeypatch, tmp_path):
     monkeypatch.setattr(browser, 'get', Mock())
     monkeypatch.setattr(browser_module.time, 'sleep', lambda _: None)
     browser.open_folder_page(FOLDER, 2)
-    browser.get.assert_called_once_with(url + '?p=2&f=')
+    browser.get.assert_called_once_with(url + '?p=2&f=&fase=NA==')
